@@ -1,0 +1,76 @@
+"""
+取得使用者的閱讀清單
+去網頁取得最新一話資訊
+跟使用者閱讀紀錄比較有沒有更新連載
+Ja,
+    通知使用者
+    更新使用者閱讀紀錄
+Nein,
+    Nicht tun
+"""
+
+from airflow.decorators import dag, task, base, sensor_task, branch_task
+from datetime import datetime
+import json
+import os
+
+from scrapy.crawler import CrawlerProcess
+from scrapy.utils.project import get_project_settings
+from crawl_roman.crawl_roman.spiders import mingzw
+
+
+def process_read_history(mode):
+    """讀取或更新閱讀紀錄"""
+    print(os.getcwd())
+    read_history_path = os.path.join("airflow/data/read_history.json")
+    print(read_history_path)
+    print(os.path.exists(read_history_path))
+    if mode == "read":
+        with open(read_history_path, "r", encoding="utf-8") as fp:
+            read_history = json.load(fp)
+        print(read_history)
+        return read_history
+    elif mode == "update":
+        print("更新")
+    else:
+        print("錯誤")
+
+
+@dag(start_date=datetime(2023, 11, 29), schedule=None, catchup=False)
+def crawl_roman_dag():
+    @task
+    def get_read_history():
+        return process_read_history("read")
+
+    @task
+    def get_roman_info(read_history):
+        # scrapy crawl mingzw -o 39680.jsonl -a bookid=39680
+        # scrapy runspider scrapy_project/crawl_roman/spiders/mingzw.py -a bookid=39680
+        bookid = dict(read_history)
+        print("bookid:", bookid)
+        process = CrawlerProcess()
+        process.crawl(mingzw, bookid=bookid[0])
+        process.start()  # the script will block here until the crawling is finished
+
+        return process
+
+    @task
+    def check_roman_updated(process):
+        return
+
+    @task
+    def send_notification():
+        return
+
+    @task
+    def update_read_history():
+        return process_read_history("update")
+
+    @task
+    def roman_not_updated():
+        return
+
+    check_roman_updated(get_roman_info(get_read_history()))
+
+
+crawl_roman_dag()

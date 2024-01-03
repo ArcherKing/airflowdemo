@@ -1,0 +1,127 @@
+"""
+取得使用者的閱讀清單
+去網頁取得最新一話資訊
+跟使用者閱讀紀錄比較有沒有更新連載
+Ja,
+    生成通知訊息
+    通知使用者
+    更新使用者閱讀紀錄
+Nein,
+    Nicht tun
+"""
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.bash import BashOperator
+from airflow.operators.branch import BaseBranchOperator
+from airflow.models.taskinstance import TaskInstance
+from datetime import datetime
+import json
+import os
+import re
+
+
+def process_read_history(mode, ti: TaskInstance):
+    """讀取或更新閱讀紀錄"""
+
+    read_history_path = os.path.join("airflow/data/read_history.json")
+    if mode == "read":
+        with open(read_history_path, "r", encoding="utf-8") as fp:
+            read_history = json.load(fp)
+        # read_history = dict(read_history)
+        # bookids = read_history.keys()
+        # ti.xcom_push(key="bookids", value=bookids)
+        return dict(read_history)
+    elif mode == "update":
+        print("更新")
+    else:
+        print("錯誤")
+
+
+def check_updated_and_generate_message(ti: TaskInstance):
+    read_history = ti.xcom_pull(task_ids="get_read_history")
+    with open("../data/crawl.jsonl", "r", encoding="utf-8") as fp:
+        crawl_roman_list = [
+            json.loads(crawl_roman_json) for crawl_roman_json in fp.readlines()
+        ]
+
+    notification_messages = []
+    updated = False
+    for crawl_roman_json in crawl_roman_list:
+        crawl_roman = dict(crawl_roman_json).items()
+        bookid = crawl_roman["bookid"]
+        latest_episode_info = crawl_roman["latest_episode_info"]
+        latest_chapter_num = latest_episode_info["text"].split(" ")[0]
+        previous_chapter_num = read_history[bookid]["previous_chapter_num"]
+
+        updated = latest_chapter_num != previous_chapter_num or updated
+        # updated = any((updated, latest_chapter_num != previous_chapter_num))
+        # updated = True if latest_chapter_num != previous_chapter_num else updated
+
+        title = latest_episode_info["title"]
+        href = f'https://tw.mingzw.net{latest_episode_info["href"]}'
+        try:
+            # 小說名:世家族女 作者:夜纖雪 章節名:第三十七章 收留 更新時間:11-29
+            pattern = re.compile(
+                r"小說名:(?P<bookname>.*?) 作者:(?P<author>.*?) 章節名:(?P<episode_name>.*?) 更新時間:(?P<update_date>.*?)$"
+            )
+            match = pattern.search(title)
+            data = match.groupdict()
+            data = {key: value.strip() for key, value in data.items()}
+            message = f"😏{data['update_date']} {data['bookname']} {data['episode_name']} {data['author']} {href}"
+        except Exception as e:
+            print(e)
+            message = f"🙄{title} {href}"
+
+        notification_messages.append(message)
+
+    with open("../data/message.txt", "w", encoding="utf-8") as fp:
+        fp.writelines(notification_messages)
+
+    return updated
+
+
+dag = DAG(
+    dag_id="crawl_roman_dag",
+    start_date=datetime(2023, 11, 29),
+    schedule=None,
+    catchup=False,
+)
+
+get_read_history = PythonOperator(
+    task_id="get_read_history",
+    python_callable=process_read_history,
+    op_args=["read"],
+    dag=dag,
+)
+
+# cd ~/airflow/crawl_roman;scrapy runspider crawl_roman/spiders/mingzw.py -a bookids=39680,38692
+get_roman_info = BashOperator(
+    task_id="get_roman_info",
+    bash_command="cd ~/airflow/crawl_roman;scrapy crawl mingzw -a bookids=\"{{','.join(ti.xcom_pull('get_read_history').keys())}}\"",
+    dag=dag,
+)
+
+check_roman_updated = PythonOperator(
+    task_id="check_roman_updated",
+    python_callable=check_updated_and_generate_message,
+    dag=dag,
+)
+
+get_read_history >> get_roman_info
+
+# @task
+# def check_roman_updated(process):
+#     return
+
+# @task
+# def send_notification():
+#     return
+
+# @task
+# def update_read_history():
+#     return process_read_history("update")
+
+# @task
+# def roman_not_updated():
+#     return
